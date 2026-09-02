@@ -110,6 +110,8 @@ A Region elevation range does not give the surface physical thickness.
 
 Foundry's rendered light polygons remain two-dimensional. WAVES can recover a geometrically visible target reached by an active light source through height-valid light rays even when Foundry's rendered light shape is blocked at another elevation.
 
+A Tile with **Restrict Light** blocks those recovered light rays as a horizontal plane at the Tile's elevation when it applies to the source or target Level. WAVES does not add Tile thickness or treat ordinary Tiles as sight blockers.
+
 Recovered targets use distinct outlines:
 
 - cyan: height-aware sampled sight;

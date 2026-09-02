@@ -78,6 +78,9 @@ function isPointOnSightWall(point) {
 		if (document.sight === CONST.EDGE_SENSE_TYPES.NONE) return false;
 		if (document.door && document.ds === CONST.WALL_DOOR_STATES.OPEN) return false;
 		if (!wallBlocksAtElevation(document, point.elevation)) return false;
+		if (wall.edge.a.x === wall.edge.b.x && wall.edge.a.y === wall.edge.b.y) {
+			return Math.hypot(point.x - wall.edge.a.x, point.y - wall.edge.a.y) <= 1;
+		}
 		const closest = foundry.utils.closestPointToSegment(point, wall.edge.a, wall.edge.b);
 		return Math.hypot(point.x - closest.x, point.y - closest.y) <= 1;
 	});
@@ -134,7 +137,30 @@ function hasBlockingSurfaceCollision(origin, destination, type) {
 	return canvas.scene.testSurfaceCollision(origin, destination, { type, mode: 'any', tMax: Math.min(1, t + epsilon), level: originLevel }) || (t < 1 && canvas.scene.testSurfaceCollision(origin, destination, { type, mode: 'any', tMin: Math.max(0, t - epsilon), level: destinationLevel }));
 }
 
+function hasBlockingTileLightCollision(origin, destination) {
+	const delta = destination.elevation - origin.elevation;
+	if (!delta) return false;
+	for (const tile of canvas.tiles.placeables) {
+		const document = tile.document;
+		if (document.hidden || !document.restrictions.light) continue;
+		if (!document.includedInLevel(origin.level) && !document.includedInLevel(destination.level)) continue;
+		const t = (document.elevation - origin.elevation) / delta;
+		if (t <= 0 || t >= 1) continue;
+		const point = {
+			x: Math.mix(origin.x, destination.x, t),
+			y: Math.mix(origin.y, destination.y, t),
+		};
+		if (tile.mesh?.containsCanvasPoint(point)) return true;
+	}
+	return false;
+}
+
 let wallHeightOverlay;
+
+function clearWallHeightOverlay() {
+	if (wallHeightOverlay && !wallHeightOverlay.destroyed) wallHeightOverlay.destroy({ children: true });
+	wallHeightOverlay = null;
+}
 
 function drawDashedWall(graphics, coordinates, color) {
 	const [x1, y1, x2, y2] = coordinates;
@@ -152,8 +178,7 @@ function drawDashedWall(graphics, coordinates, color) {
 }
 
 export function refreshWallHeightOverlay() {
-	if (wallHeightOverlay && !wallHeightOverlay.destroyed) wallHeightOverlay.destroy({ children: true });
-	wallHeightOverlay = null;
+	clearWallHeightOverlay();
 	if (!canvas.ready || !game.settings?.get(MODULE_ID, 'showPassableWallOverlay')) return;
 	const token = canvas.tokens.controlled[0];
 	if (!token) return;
@@ -760,7 +785,8 @@ function isHeightAwareIlluminated(target) {
 		const origin = source.origin;
 		return samples.some((destination) => isPointWithinLightSource(source, destination)
 			&& !getCachedCollision(origin, destination, 'light')
-			&& !getCachedCollision(origin, destination, 'light', true));
+			&& !getCachedCollision(origin, destination, 'light', true)
+			&& !hasBlockingTileLightCollision(origin, destination));
 	});
 	heightIlluminationCache.set(targetId, illuminated);
 	return illuminated;
@@ -835,6 +861,7 @@ export function registerHeightAwareVisibilityHooks() {
 		invalidateHeightVisibilityCache();
 		refreshWallHeightOverlay();
 	});
+	Hooks.on('canvasTearDown', clearWallHeightOverlay);
 	Hooks.on('controlToken', refreshWallHeightOverlay);
 	Hooks.on('updateWall', () => {
 		invalidateHeightVisibilityCache();
@@ -850,6 +877,8 @@ export function registerHeightAwareVisibilityHooks() {
 			if (behavior.type === 'defineSurface' && (behavior.system.sight || foundry.utils.hasProperty(change ?? {}, 'system.sight'))) refreshSightSurfaces();
 		});
 	}
+	for (const hook of ['createTile', 'updateTile', 'deleteTile']) Hooks.on(hook, invalidateHeightVisibilityCache);
+
 	Hooks.on('updateCombat', (combat, change) => {
 		if (!['round', 'turn', 'active'].some((field) => foundry.utils.hasProperty(change, field))) return;
 		invalidateHeightVisibilityCache();
@@ -869,6 +898,7 @@ export function registerHeightAwareVisibilityHooks() {
 			if (moved) sourceAnchorHistory.set(this.document.uuid, previousOrigin);
 			const generation = movement ? (movementGenerations.get(this) ?? 0) + 1 : 0;
 			if (movement) {
+				clearWallHeightOverlay();
 				movementGenerations.set(this, generation);
 				movingTokens.add(this);
 			} else invalidateHeightVisibilityCache();
