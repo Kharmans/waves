@@ -1,0 +1,39 @@
+{
+  "WAVES": {
+    "LinksMenu": {
+      "Name": "Suporte do Módulo",
+      "Label": "Links",
+      "Hint": "Abre a documentação do WAVES, o rastreador de problemas e os links de suporte.",
+      "GitHubMessage": "Links do GitHub",
+      "DiscordMessage": "Entre na Toca",
+      "SupportMessage": "Dê um Trocado pro seu Bugbear",
+      "Title": "Recursos e Suporte: WAVES"
+    },
+    "Wall": { "Height": "Altura da Parede", "Bottom": "Base da Parede", "Top": "Topo da Parede", "HeightHint": "Os Andares são atribuídos automaticamente a partir deste intervalo de elevação." },
+    "Settings": {
+      "PeekingMode": { "Name": "Espiada Automática", "Hint": "Permite que tokens adjacentes a uma cobertura que bloqueia a visão, usem posições de espiada específicas para cada alvo. Fora de combate, tokens elegíveis podem espiar, mas durante o combate, apenas o combatente ativo pode espiar.", "Disabled": "Desativada", "Auto": "Ativada" },
+      "VisibilitySampleMode": { "Name": "Área do Alvo", "Hint": "Escolha quanto do alvo é testado ao determinar a visibilidade e a cobertura.", "Grid": "Todo o Espaço Ocupado", "Body": "Área Corporal Menor" },
+      "VisionSourceMode": { "Name": "Posição de Visão", "Hint": "Escolha se o token enxerga a partir do seu centro ou de vários pontos dentro do seu espaço ocupado.", "Singular": "Centro", "Grid": "Todo o Espaço Ocupado" },
+      "NewWallHeightMode": { "Name": "Altura de Novas Paredes", "Hint": "Mantém a atribuição de Andar visualizado do Foundry para paredes recém-desenhadas e também ajusta as alturas de base/topo do WAVES a esse Andar, ou faz com que elas se apliquem de forma ilimitada a todos os Andares. Use o atalho Alternar Modo de Altura de Novas Paredes (Alt+W por padrão) para trocar de modo antes de desenhar uma parede.", "Level": "Andar Visualizado (padrão do Foundry)", "Unbounded": "Todos os Andares (Ilimitado)" },
+      "VisibilityCalculationMode": { "Name": "Modo de Visibilidade", "Hint": "Usa a visibilidade baseada no centro do Foundry com paredes sensíveis à altura, ou a visibilidade e cobertura amostradas do WAVES.", "Foundry": "Foundry", "Sampled": "WAVES" },
+      "EyeHeightPercent": { "Name": "Altura dos Olhos", "Hint": "Posição padrão dos olhos como porcentagem da profundidade vertical do token." },
+      "EyeTolerancePercent": { "Name": "Movimento Vertical dos Olhos", "Hint": "O quanto um token pode normalmente olhar acima ou abaixo da altura dos seus olhos, como porcentagem da sua profundidade vertical." },
+      "EyeSampleCount": { "Name": "Posições Verticais dos Olhos", "Hint": "Número de posições dos olhos testadas ao longo do movimento vertical permitido." },
+      "TokenVision": { "Legend": "WAVES", "Automatic": "Automático", "Airborne": "Estado Aéreo", "Grounded": "Em Solo", "Flying": "Aéreo" },
+      "ResetEyeSetting": "Restaurar Padrão",
+      "ShowPassableWallOverlay": { "Name": "Mostrar Paredes Atravessáveis por Altura", "Hint": "Desenha sobreposições tracejadas verdes para as paredes que não se sobrepõem ao volume vertical atual do token controlado." },
+      "SynchronizeTokenLevel": { "Name": "Sincronizar o Andar do Token com a Elevação", "Hint": "Solicita mover os tokens para um Andar correspondente quando a elevação deles cruza o limite de um Andar. O WAVES desativa esse comportamento quando o módulo Elevation Level Change está ativo." },
+      "PerformanceDebug": { "Name": "Debug de Desempenho", "Hint": "Registra no console os dados agregados de desempenho do WAVES." }
+    },
+    "LevelTransition": { "Title": "WAVES: Alterar o Andar do Token", "Confirm": "Mover {token} para {level}?", "Level": "Andar", "CompatibilityWarning": "WAVES: O módulo Elevation Level Change está ativo, portanto a sincronização de Andar do token pelo WAVES está desativada. O Elevation Level Change pode permitir que a elevação e o Andar do token fiquem incompatíveis." },
+    "Keybindings": {
+      "ToggleNewWallHeightMode": { "Name": "Alternar Modo de Altura de Novas Paredes", "Hint": "Alterna o modo de posicionamento de novas paredes entre Andar Visualizado e Todos os Andares (Ilimitado)." }
+    },
+    "Notifications": {
+      "NewWallHeightMode": {
+        "Level": "WAVES: Altura de novas paredes — Andar Visualizado (padrão do Foundry)",
+        "Unbounded": "WAVES: Altura de novas paredes — Todos os Andares (Unbounded)"
+      }
+    }
+  }
+}

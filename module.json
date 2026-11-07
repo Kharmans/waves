@@ -15,7 +15,10 @@
 	],
 	"esmodules": ["scripts/waves-main.mjs"],
 	"styles": ["styles/waves.css"],
-	"languages": [{ "lang": "en", "path": "lang/en.json", "name": "English" }],
+	"languages": [
+		{ "lang": "en", "path": "lang/en.json", "name": "English" },
+		{ "lang": "pt-BR", "name": "Português (Brasil)", "path": "lang/pt-BR.json" }
+	],
 	"relationships": {
 		"requires": [{ "id": "lib-wrapper", "type": "module", "manifest": "https://github.com/ruipin/fvtt-lib-wrapper/releases/latest/download/module.json", "compatibility": { "verified": "1.12.12.1" } }]
 	},
