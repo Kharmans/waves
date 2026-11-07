@@ -96,15 +96,40 @@ function getSourceSampleAnchor(document, origin, xyPoints, elevation) {
 	if (!distance) return center;
 	return { x: origin.x + (reference.x - origin.x) / distance, y: origin.y + (reference.y - origin.y) / distance, elevation };
 }
-export function hasBlockingWallCollision(origin, destination, type = 'move') {
+function getWallCollisionOptions(source) {
+	const document = source?.document ?? source;
+	if (document?.documentName === 'Token' && document.getSize) {
+		const { width, height } = document.getSize();
+		return { externalRadius: Math.min(width, height) / 2 };
+	}
+	const object = source?.document ? source : source?.object;
+	return { externalRadius: object?.externalRadius ?? source?.data?.externalRadius ?? 0 };
+}
+
+export function hasBlockingWallCollision(origin, destination, type = 'move', { useThreshold = type === 'sight', externalRadius = 0 } = {}) {
 	if (!canvas.dimensions.rect.contains(origin.x, origin.y)) return false;
 	const backend = CONFIG.Canvas.polygonBackends[type];
+	const thresholdOrigin = { x: Math.round(origin.x), y: Math.round(origin.y) };
 	for (const level of canvas.scene.levels) {
-		const collisions = backend.testCollision(origin, destination, { type, mode: 'all', level, wavesIntersectionElevation: true });
+		// Retain threshold intersections so attenuation can limit rays beyond the wall.
+		const collisions = backend.testCollision(origin, destination, { type, mode: 'all', level, useThreshold: false, externalRadius, wavesIntersectionElevation: true });
 		if (
 			collisions.some((collision) => {
 				const elevation = origin.elevation + (destination.elevation - origin.elevation) * collision._distance;
-				return Array.from(collision.edges).some((edge) => wallBlocksAtElevation(edge.object, elevation));
+				return Array.from(collision.edges).some((edge) => {
+					if (!wallBlocksAtElevation(edge.object, elevation)) return false;
+					if (!useThreshold || (edge.a.x === edge.b.x && edge.a.y === edge.b.y) || !edge.applyThreshold(type, thresholdOrigin, externalRadius)) return true;
+					if (!edge.threshold?.attenuation) return false;
+					// Match Foundry's radial threshold attenuation (PointSourcePolygon).
+					const closest = foundry.utils.closestPointToSegment(thresholdOrigin, edge.a, edge.b);
+					const inside = Math.hypot(closest.x - thresholdOrigin.x, closest.y - thresholdOrigin.y);
+					const proximity = edge[type] === CONST.EDGE_SENSE_TYPES.PROXIMITY;
+					const distance = proximity ? Math.max(inside - externalRadius, 0) : inside + externalRadius;
+					const ratio = distance / edge.threshold[type];
+					const inverse = proximity ? 1 - ratio : Math.min(1, ratio - 1);
+					const outside = inverse / (2 * (1 - inverse)) * CONFIG.Wall.thresholdAttenuationMultiplier * edge.threshold[type];
+					return Math.hypot(Math.round(destination.x) - thresholdOrigin.x, Math.round(destination.y) - thresholdOrigin.y) > inside + outside;
+				});
 			})
 		)
 			return true;
@@ -155,7 +180,46 @@ function hasBlockingTileLightCollision(origin, destination) {
 	return false;
 }
 
+function getTokenBounds(subject) {
+	const document = subject?.document ?? subject;
+	if (document?.getSize) {
+		const { width, height } = document.getSize();
+		const { x, y } = document;
+		return { x, y, width, height, left: x, right: x + width, top: y, bottom: y + height };
+	}
+	return (subject?.document ? subject : document?.object)?.bounds;
+}
+
+function hasBlockingTokenCollision(origin, destination, source, target) {
+	const sourceId = (source?.document ?? source)?.id;
+	const targetId = (target?.document ?? target)?.id;
+	const dx = destination.x - origin.x;
+	const dy = destination.y - origin.y;
+	const dz = destination.elevation - origin.elevation;
+	return Array.from(canvas.scene.tokens).some((document) => {
+		if (document.id === sourceId || document.id === targetId || document.hidden) return false;
+		const bounds = getTokenBounds(document);
+		const bottom = Number(document.elevation ?? 0);
+		const depth = Number(document.depth);
+		const top = bottom + (Number.isFinite(depth) && depth > 0 ? depth : 1) * canvas.grid.distance * (resolveIsProne(document) ? 0.5 : 1);
+		let tMin = 0;
+		let tMax = 1;
+		for (const [start, delta, min, max] of [[origin.x, dx, bounds.left, bounds.right], [origin.y, dy, bounds.top, bounds.bottom], [origin.elevation, dz, bottom, top]]) {
+			if (!delta) {
+				if (start < min || start > max) return false;
+				continue;
+			}
+			const a = (min - start) / delta;
+			const b = (max - start) / delta;
+			tMin = Math.max(tMin, Math.min(a, b));
+			tMax = Math.min(tMax, Math.max(a, b));
+			if (tMin > tMax) return false;
+		}
+		return tMax > 0 && tMin < 1;
+	});
+}
 let wallHeightOverlay;
+let wallHeightOverlayRefreshPending = false;
 
 function clearWallHeightOverlay() {
 	if (wallHeightOverlay && !wallHeightOverlay.destroyed) wallHeightOverlay.destroy({ children: true });
@@ -179,6 +243,7 @@ function drawDashedWall(graphics, coordinates, color) {
 
 export function refreshWallHeightOverlay() {
 	clearWallHeightOverlay();
+	if (isTokenMovementInProgress()) return;
 	if (!canvas.ready || !game.settings?.get(MODULE_ID, 'showPassableWallOverlay')) return;
 	const token = canvas.tokens.controlled[0];
 	if (!token) return;
@@ -200,6 +265,9 @@ export function refreshWallHeightOverlay() {
 
 function getVisibilityPoint(subject) {
 	const document = subject?.document ?? subject;
+	if (document?.documentName === 'Token' && document.parent && document.parent !== canvas.scene) {
+		throw new Error('WAVES visibility calculations require tokens from the currently viewed Scene.');
+	}
 	if (document?.documentName === 'Token') return { ...document.getVisionOrigin(), level: document.level };
 	const point = {
 		x: Number(subject?.x),
@@ -268,8 +336,7 @@ export function getVisionOrigins(subject, { includePeeking } = {}) {
 	}
 	if (!includePeeking) return origins;
 
-	const object = subject?.document ? subject : document.object;
-	const bounds = object?.bounds;
+	const bounds = getTokenBounds(subject);
 	if (!bounds) return origins;
 	const clearance = Math.max(1, Math.min(bounds.width, bounds.height) * 0.05);
 	const offsets = {
@@ -360,8 +427,7 @@ function getTokenVisibilityPoints(subject, sampleMode) {
 		return Array.from(points.values());
 	}
 
-	const object = subject?.document ? subject : document.object;
-	const bounds = object?.bounds;
+	const bounds = getTokenBounds(subject);
 	if (!bounds) return [{ ...document.getVisionOrigin(), level: document.level }];
 	const bottom = Number(document.elevation ?? 0);
 	const depth = Number(document.depth);
@@ -380,6 +446,44 @@ function getTokenVisibilityPoints(subject, sampleMode) {
 	);
 }
 
+function getTokenVolumeCorners(subject) {
+	const document = subject?.document ?? subject;
+	const bounds = getTokenBounds(subject);
+	if (document?.documentName !== 'Token' || !bounds) return [];
+	const bottom = Number(document.elevation ?? 0);
+	const depth = Number(document.depth);
+	const height = (Number.isFinite(depth) && depth > 0 ? depth : 1) * canvas.grid.distance * (resolveIsProne(subject) ? 0.5 : 1);
+	const inset = Math.min(Math.max(1, canvas.grid.size * 0.01), bounds.width / 2, bounds.height / 2);
+	const xs = [bounds.left + inset, bounds.right - inset];
+	const ys = [bounds.top + inset, bounds.bottom - inset];
+	const zs = [bottom + height * 0.05, bottom + height * 0.95];
+	return xs.flatMap((x) => ys.flatMap((y) => zs.map((elevation) => ({ x, y, elevation, level: document.level }))));
+}
+
+function measureCornerCover(source, target, { type, includeSurfaces, tokenCover, peekOrigins = [] }) {
+	const corners = getTokenVolumeCorners(source);
+	const center = getVisibilityPoint(source);
+	const document = source?.document ?? source;
+	const xyPoints = new Map(corners.map((corner) => [`${corner.x},${corner.y}`, corner]));
+	const origins = [...corners.filter((corner) => {
+		const anchor = { ...getSourceSampleAnchor(document, center, xyPoints, corner.elevation), level: document.level };
+		return !hasBlockingWallCollision(anchor, corner, type, getWallCollisionOptions(source))
+			&& (!includeSurfaces || !hasBlockingSurfaceCollision(anchor, corner, type));
+	}), ...peekOrigins];
+	const destinations = getTokenVolumeCorners(target);
+	let best = { origin: null, results: [], uncoveredSamples: 0, totalSamples: destinations.length };
+	for (const origin of origins) {
+		const results = destinations.map((destination) => {
+			const wallCollision = hasBlockingWallCollision(origin, destination, type, getWallCollisionOptions(source));
+			const surfaceCollision = !wallCollision && includeSurfaces && hasBlockingSurfaceCollision(origin, destination, type);
+			const tokenCollision = !wallCollision && !surfaceCollision && tokenCover && hasBlockingTokenCollision(origin, destination, source, target);
+			return { origin, destination, wallCollision, surfaceCollision, tokenCollision, visible: !wallCollision && !surfaceCollision && !tokenCollision };
+		});
+		const uncoveredSamples = results.filter((result) => result.visible).length;
+		if (!best.origin || uncoveredSamples > best.uncoveredSamples) best = { origin, results, uncoveredSamples, totalSamples: destinations.length };
+	}
+	return best;
+}
 function getReachableTokenVisibilityPoints(subject) {
 	const document = subject?.document ?? subject;
 	const samples = getTokenVisibilityPoints(subject);
@@ -397,7 +501,7 @@ function getReachableTokenVisibilityPoints(subject) {
 export function testVisibility(source, target) {
 	const origin = getVisibilityPoint(source);
 	const destination = getVisibilityPoint(target);
-	return !hasBlockingWallCollision(origin, destination, 'sight');
+	return !hasBlockingWallCollision(origin, destination, 'sight', getWallCollisionOptions(source));
 }
 
 function showVisibilitySampleRays(origin, results, options) {
@@ -426,7 +530,7 @@ function showVisibilitySampleRays(origin, results, options) {
 	}, duration);
 }
 
-function logVisibilityDebug(source, target, calculationMode, origins, samples, measurements, options) {
+function logVisibilityDebug(source, target, calculationMode, origins, samples, measurements, options, coverDetails = null) {
 	const describeToken = (subject) => {
 		const document = subject?.document ?? subject;
 		return {
@@ -468,12 +572,12 @@ function logVisibilityDebug(source, target, calculationMode, origins, samples, m
 	});
 	const wallIntersections = Array.from(canvas.scene.walls).flatMap((wall) => {
 		const [x1, y1, x2, y2] = wall.c;
-		const intersections = rays.filter((ray) => ray.visible).flatMap((ray) => {
+		const intersections = [true, false].flatMap((visible) => rays.filter((ray) => ray.visible === visible && (visible || ray.wallCollision)).flatMap((ray) => {
 			const point = foundry.utils.lineSegmentIntersection(ray.origin, ray.destination, { x: x1, y: y1 }, { x: x2, y: y2 });
 			if (!point) return [];
 			const elevation = ray.origin.elevation + (ray.destination.elevation - ray.origin.elevation) * point.t0;
-			return [{ point: { x: point.x, y: point.y }, elevation, blocksAtElevation: wallBlocksAtElevation(wall, elevation) }];
-		}).slice(0, 5);
+			return [{ ...describeRay(ray), point: { x: point.x, y: point.y }, elevation, blocksAtElevation: wallBlocksAtElevation(wall, elevation) }];
+		}).slice(0, 5));
 		return intersections.length ? [{ id: wall.id, name: wall.name, coordinates: wall.c, sight: wall.sight, levels: Array.from(wall.levels), heights: getWallElevationRanges(wall), intersections }] : [];
 	});
 	console.log(JSON.stringify({
@@ -488,6 +592,8 @@ function logVisibilityDebug(source, target, calculationMode, origins, samples, m
 			units: canvas.scene.grid.units,
 		},
 		options,
+		coverDetails,
+		combat: { started: Boolean(game.combat?.started), activeTokenId: game.combat?.combatant?.tokenId ?? null, sourceTurn: isSourceTurn(source) },
 		levels: Array.from(canvas.scene.levels, (level) => ({ id: level.id, name: level.name, elevation: level.elevation })),
 		surfaces: canvas.scene.getSurfaces({ type: options.type }).map((surface) => ({
 			key: surface.key,
@@ -508,15 +614,19 @@ function logVisibilityDebug(source, target, calculationMode, origins, samples, m
 		},
 		visibleOrigins: measurements.filter((measurement) => measurement.visibleSamples).slice(0, 5).map((measurement) => ({ origin: measurement.origin, visibleSamples: measurement.visibleSamples })),
 		visibleRays: rays.filter((ray) => ray.visible).slice(0, 5).map(describeRay),
+		wallBlockedRays: rays.filter((ray) => ray.wallCollision).slice(0, 5).map(describeRay),
 		surfaceBlockedRays: rays.filter((ray) => ray.surfaceCollision).slice(0, 5).map(describeRay),
 	}));
 }
 export function measureVisibility(source, target, { showTestSamples = false, type = 'sight', includeSurfaces = true, ignoreHidden = false, usePeeking } = {}) {
+	// Validate both scenes before using the active canvas collision backends.
+	getVisibilityPoint(source);
+	getVisibilityPoint(target);
 	const sampledMode = (game.settings?.get(MODULE_ID, 'visibilityCalculationMode') ?? 'foundry') === 'sampled';
 	if (!sampledMode) {
 		const origin = getVisibilityPoint(source);
 		const destination = getVisibilityPoint(target);
-		const wallCollision = hasBlockingWallCollision(origin, destination, type);
+		const wallCollision = hasBlockingWallCollision(origin, destination, type, getWallCollisionOptions(source));
 		const surfaceCollision = !wallCollision && includeSurfaces && hasBlockingSurfaceCollision(origin, destination, type);
 		const visible = !wallCollision && !surfaceCollision;
 		const hidden = !ignoreHidden && resolveIsHidden(target);
@@ -528,8 +638,8 @@ export function measureVisibility(source, target, { showTestSamples = false, typ
 		}
 		return {
 			visible, detected, attackable: detected, attackableInTurn: detected, hidden,
-			percentage: visible ? 100 : 0, cover: null, coverBonus: 0,
-			visibleSamples: Number(visible), totalSamples: 1, origin: { ...origin },
+			percentage: visible ? 100 : 0, cover: null, coverCalculationMode: null, coverBonus: 0,
+			visibleSamples: Number(visible), uncoveredSamples: Number(visible), totalSamples: 1, totalCoverSamples: 1, origin: { ...origin },
 			peekUsed: false, peekDirection: null,
 			originX: origin.x, originY: origin.y, originElevation: origin.elevation,
 			peek: { used: false, direction: null }, baseVisibleSamples: Number(visible),
@@ -540,7 +650,7 @@ export function measureVisibility(source, target, { showTestSamples = false, typ
 	const samples = getReachableTokenVisibilityPoints(target);
 	const measurements = origins.map((origin) => {
 		const results = samples.map((destination) => {
-			const wallCollision = hasBlockingWallCollision(origin, destination, type);
+			const wallCollision = hasBlockingWallCollision(origin, destination, type, getWallCollisionOptions(source));
 			const surfaceCollision = !wallCollision && includeSurfaces && hasBlockingSurfaceCollision(origin, destination, type);
 			return { destination, wallCollision, surfaceCollision, visible: !wallCollision && !surfaceCollision };
 		});
@@ -558,8 +668,42 @@ export function measureVisibility(source, target, { showTestSamples = false, typ
 	const { results, visibleSamples } = measurement;
 	const peekUsed = visibleSamples > baseMeasurement.visibleSamples;
 	const origin = (peekUsed ? results.find((result) => result.visible && result.origin?.peek)?.origin : null) ?? results.find((result) => result.visible)?.origin ?? origins[0];
+	const tokenCover = game.settings?.get(MODULE_ID, 'tokenCover') ?? false;
+	const coverCalculationMode = game.settings?.get(MODULE_ID, 'coverCalculationMode') ?? 'sampled3d';
+	const coverResults = coverCalculationMode === 'corners3d' ? null : samples.map((destination, index) => {
+		const candidates = measurements.filter((candidate) => candidate.results[index].visible);
+		const candidate = candidates.find((candidate) => !tokenCover || !hasBlockingTokenCollision(candidate.origin, destination, source, target));
+		const blocked = measurements[0]?.results[index];
+		return {
+			origin: candidate?.origin ?? candidates[0]?.origin ?? measurements[0]?.origin,
+			destination,
+			wallCollision: !candidates.length && Boolean(blocked?.wallCollision),
+			surfaceCollision: !candidates.length && Boolean(blocked?.surfaceCollision),
+			tokenCollision: candidates.length > 0 && !candidate,
+			visible: Boolean(candidate),
+		};
+	});
+	const coverMeasurement = coverCalculationMode === 'corners3d'
+		? measureCornerCover(source, target, { type, includeSurfaces, tokenCover, peekOrigins: origins.filter((candidate) => candidate.peek) })
+		: {
+			origin: null,
+			results: coverResults,
+			uncoveredSamples: coverResults.filter((result) => result.visible).length,
+			totalSamples: samples.length,
+		};
+	const { uncoveredSamples, totalSamples: totalCoverSamples } = coverMeasurement;
+	const coverDetails = {
+		origin: coverMeasurement.origin ? { ...coverMeasurement.origin } : null,
+		unreachableSamples: coverMeasurement.results.length ? 0 : totalCoverSamples,
+		wallBlockedSamples: coverMeasurement.results.filter((result) => result.wallCollision).length,
+		surfaceBlockedSamples: coverMeasurement.results.filter((result) => result.surfaceCollision).length,
+		tokenBlockedSamples: coverMeasurement.results.filter((result) => result.tokenCollision).length,
+		uncoveredSamples,
+		totalSamples: totalCoverSamples,
+		...(showTestSamples ? { rays: coverMeasurement.results } : {}),
+	};
 	const totalSamples = samples.length;
-	const percentage = totalSamples ? (visibleSamples / totalSamples) * 100 : 0;
+	const percentage = totalCoverSamples ? (uncoveredSamples / totalCoverSamples) * 100 : 0;
 	const cover =
 		percentage === 0 ? 'total'
 		: percentage <= 25 ? 'threeQuarters'
@@ -573,8 +717,8 @@ export function measureVisibility(source, target, { showTestSamples = false, typ
 	const sourceTurn = isSourceTurn(source);
 	const attackableInTurn = attackable && (!peekUsed || sourceTurn);
 	if (showTestSamples) {
-		showVisibilitySampleRays(origin, measurements.flatMap((measurement) => measurement.results.map((result) => ({ ...result, origin: measurement.origin }))), showTestSamples);
-		logVisibilityDebug(source, target, 'sampled', origins, samples, measurements, { type, includeSurfaces, includePeeking });
+		showVisibilitySampleRays(origin, coverMeasurement.results, showTestSamples);
+		logVisibilityDebug(source, target, 'sampled', origins, samples, measurements, { type, includeSurfaces, includePeeking }, coverDetails);
 	}
 	return {
 		visible,
@@ -584,12 +728,16 @@ export function measureVisibility(source, target, { showTestSamples = false, typ
 		hidden,
 		percentage,
 		cover,
+		coverCalculationMode,
+		coverDetails,
 		coverBonus:
 			cover === 'threeQuarters' ? 5
 			: cover === 'half' ? 2
 			: 0,
 		visibleSamples,
+		uncoveredSamples,
 		totalSamples,
+		totalCoverSamples,
 		origin: { ...origin },
 		peekUsed,
 		peekDirection: peekUsed ? origin.direction : null,
@@ -616,18 +764,29 @@ export function getIssueReportData(source, target, options = {}) {
 	const scene = canvas.scene;
 	const describeToken = (subject) => {
 		const document = subject.document ?? subject;
+		const object = subject.document ? subject : document.object;
 		return {
 			id: document.id, name: document.name, x: document.x, y: document.y,
 			elevation: document.elevation, width: document.width, height: document.height, depth: document.depth, level: document.level,
+			hidden: document.hidden,
+			flags: document.flags?.[MODULE_ID] ?? {},
+			statuses: Array.from(document.actor?.statuses ?? []),
+			sight: document.sight,
+			detectionModes: document.detectionModes,
+			rendered: object ? { visible: object.visible, isVisible: object.isVisible, filter: object.detectionFilter?.constructor?.name ?? null } : null,
+			visionSource: object?.vision ? { active: object.vision.active, data: object.vision.data } : null,
 		};
 	};
 	const settingKeys = [
-		'newWallHeightMode', 'visibilityCalculationMode', 'peekingMode', 'visibilitySampleMode',
+		'newWallHeightMode', 'visibilityCalculationMode', 'peekingMode', 'visibilitySampleMode', 'coverCalculationMode', 'tokenCover',
 		'visionSourceMode', 'eyeHeightPercent', 'eyeTolerancePercent', 'eyeSampleCount',
 		'showPassableWallOverlay', 'synchronizeTokenLevel', 'performanceDebug',
 	];
 	return {
 		waves: 'issueReport',
+		isGM: game.user.isGM,
+		viewedLevel: canvas.level?.id,
+		combat: { started: Boolean(game.combat?.started), activeTokenId: game.combat?.combatant?.tokenId ?? null, sourceTurn: isSourceTurn(source), targetTurn: isSourceTurn(target) },
 		versions: {
 			foundry: game.version,
 			system: { id: game.system.id, version: game.system.version },
@@ -640,7 +799,9 @@ export function getIssueReportData(source, target, options = {}) {
 			id: scene.id,
 			name: scene.name,
 			grid: { type: scene.grid.type, size: scene.grid.size, distance: scene.grid.distance, units: scene.grid.units },
-			levels: Array.from(scene.levels, (level) => ({ id: level.id, name: level.name, elevation: level.elevation })),
+			levels: Array.from(scene.levels, (level) => ({ id: level.id, name: level.name, elevation: level.elevation, visibility: level.visibility })),
+			environment: scene.environment,
+			tiles: Array.from(scene.tiles, (tile) => ({ id: tile.id, elevation: tile.elevation, levels: Array.from(tile.levels), hidden: tile.hidden, restrictions: tile.restrictions })),
 			surfaces: scene.getSurfaces({ type: options.type ?? 'sight' }).map((surface) => ({
 				elevation: surface.elevation,
 				region: surface.region.id,
@@ -656,12 +817,15 @@ export function getIssueReportData(source, target, options = {}) {
 				move: wall.move,
 				sight: wall.sight,
 				light: wall.light,
+				direction: wall.dir,
+				threshold: wall.threshold,
 				door: wall.door,
 				doorState: wall.ds,
 			})),
 		},
 		settings: Object.fromEntries(settingKeys.map((key) => [key, game.settings.get(MODULE_ID, key)])),
 		visibility: measureVisibility(source, target, { ...options, showTestSamples: false }),
+		reverseVisibility: measureVisibility(target, source, { ...options, showTestSamples: false }),
 	};
 }
 let heightVisibilityCache = new Map();
@@ -736,25 +900,25 @@ function getAutomaticTargetSamples(source, target) {
 	return prioritizeAutomaticSamples(getReachableTokenVisibilityPoints(target), getVisibilityPoint(source), 27);
 }
 
-function getCachedCollision(origin, destination, type, surface = false) {
-	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}`;
+function getCachedCollision(origin, destination, type, surface = false, options = {}) {
+	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.level ?? canvas.level?.id}:${destination.level ?? canvas.level?.id}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}:${options.useThreshold ?? (type === 'sight')}:${options.externalRadius ?? 0}`;
 	if (collisionCache.has(key)) return collisionCache.get(key);
-	const collision = surface ? hasBlockingSurfaceCollision(origin, destination, type) : hasBlockingWallCollision(origin, destination, type);
+	const collision = surface ? hasBlockingSurfaceCollision(origin, destination, type) : hasBlockingWallCollision(origin, destination, type, options);
 	collisionCache.set(key, collision);
 	return collision;
 }
 
-function hasAnySampledVisibility(source, target, type) {
+function hasAnySampledVisibility(source, target, type, options = getWallCollisionOptions(source)) {
 	if ((game.settings?.get(MODULE_ID, 'visibilityCalculationMode') ?? 'foundry') !== 'sampled') {
 		const origin = getVisibilityPoint(source);
 		const destination = getVisibilityPoint(target);
-		return !hasBlockingWallCollision(origin, destination, type) && !hasBlockingSurfaceCollision(origin, destination, type);
+		return !hasBlockingWallCollision(origin, destination, type, options) && !hasBlockingSurfaceCollision(origin, destination, type);
 	}
 	const origins = getAutomaticVisionOrigins(source, target);
 	const samples = getAutomaticTargetSamples(source, target);
 	for (const origin of origins) {
 		for (const destination of samples) {
-			if (getCachedCollision(origin, destination, type)) continue;
+			if (getCachedCollision(origin, destination, type, false, options)) continue;
 			if (getCachedCollision(origin, destination, type, true)) continue;
 			return true;
 		}
@@ -836,7 +1000,7 @@ function getCachedHeightVisibility(visionSource, target) {
 	const targetId = target.document?.uuid ?? target.id;
 	const key = `${sourceId}:${targetId}:${type}`;
 	if (heightVisibilityCache.has(key)) return heightVisibilityCache.get(key);
-	const visible = profile('hasAnySampledVisibility', () => hasAnySampledVisibility(visionSource.object, target, type));
+	const visible = profile('hasAnySampledVisibility', () => hasAnySampledVisibility(visionSource.object, target, type, getWallCollisionOptions(visionSource)));
 	heightVisibilityCache.set(key, visible);
 	return visible;
 }
@@ -852,21 +1016,39 @@ export function registerHeightAwareVisibilityHooks() {
 	};
 	const refreshSightSurfaces = () => {
 		invalidateHeightVisibilityCache();
-		canvas.perception.update({ initializeVision: true, refreshVision: true });
+		if (canvas.ready) canvas.perception.update({ initializeVision: true, refreshVision: true });
 	};
-	const hasSightSurface = (region) => region.behaviors.some((behavior) => behavior.type === 'defineSurface' && behavior.system.sight);
-	Hooks.on('visibilityRefresh', drawSampledVision);
+	Hooks.on('updateSetting', (setting) => {
+		if (setting.key.startsWith(`${MODULE_ID}.`)) refreshSightSurfaces();
+	});
+	const hasSightSurface = (region) => region.behaviors.some((behavior) => behavior.type === 'defineSurface' && (behavior.system.sight || behavior.system.light));
+	Hooks.on('visibilityRefresh', (visibility) => {
+		drawSampledVision(visibility);
+		if (!wallHeightOverlayRefreshPending) return;
+		wallHeightOverlayRefreshPending = false;
+		refreshWallHeightOverlay();
+	});
 	Hooks.on('initializeLightSources', () => { heightIlluminationCache = new Map(); });
+	Hooks.on('initializeVisionSources', invalidateHeightVisibilityCache);
+	Hooks.on('applyTokenStatusEffect', refreshSightSurfaces);
 	Hooks.on('canvasReady', () => {
 		invalidateHeightVisibilityCache();
 		refreshWallHeightOverlay();
 	});
-	Hooks.on('canvasTearDown', clearWallHeightOverlay);
+	Hooks.on('canvasTearDown', () => {
+		invalidateHeightVisibilityCache();
+		sourceAnchorHistory.clear();
+		movingTokens.clear();
+		clearWallHeightOverlay();
+	});
 	Hooks.on('controlToken', refreshWallHeightOverlay);
 	Hooks.on('updateWall', () => {
 		invalidateHeightVisibilityCache();
 		refreshWallHeightOverlay();
 	});
+	for (const hook of ['createWall', 'deleteWall', 'createToken', 'deleteToken', 'createLevel', 'updateLevel', 'deleteLevel']) {
+		Hooks.on(hook, refreshSightSurfaces);
+	}
 	for (const hook of ['createRegion', 'updateRegion', 'deleteRegion']) {
 		Hooks.on(hook, (region) => {
 			if (hasSightSurface(region)) refreshSightSurfaces();
@@ -874,7 +1056,7 @@ export function registerHeightAwareVisibilityHooks() {
 	}
 	for (const hook of ['createRegionBehavior', 'updateRegionBehavior', 'deleteRegionBehavior']) {
 		Hooks.on(hook, (behavior, change) => {
-			if (behavior.type === 'defineSurface' && (behavior.system.sight || foundry.utils.hasProperty(change ?? {}, 'system.sight'))) refreshSightSurfaces();
+			if (behavior.type === 'defineSurface' && (behavior.system.sight || behavior.system.light || ['system.sight', 'system.light'].some((field) => foundry.utils.hasProperty(change ?? {}, field)))) refreshSightSurfaces();
 		});
 	}
 	for (const hook of ['createTile', 'updateTile', 'deleteTile']) Hooks.on(hook, invalidateHeightVisibilityCache);
@@ -910,8 +1092,8 @@ export function registerHeightAwareVisibilityHooks() {
 					movingTokens.delete(this);
 					invalidateHeightVisibilityCache();
 					if (!movingTokens.size) {
+						wallHeightOverlayRefreshPending = true;
 						canvas.perception.update({ initializeVision: true, refreshVision: true });
-						refreshWallHeightOverlay();
 					}
 				});
 			}
@@ -926,7 +1108,7 @@ export function registerHeightAwareVisibilityHooks() {
 			return profile('ClockwiseSweepPolygon._testEdgeInclusion', () => {
 				const included = wrapped(edge, edgeTypes);
 				if (!included) return false;
-				if (this.config.type === 'sight') {
+				if (this.config.type === 'sight' || this.config.type === 'light') {
 					if (this.config.wavesIntersectionElevation) return true;
 					return wallBlocksAtElevation(edge.object, this.origin.elevation);
 				}

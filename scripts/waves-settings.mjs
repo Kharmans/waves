@@ -117,6 +117,23 @@ export function registerSettings() {
 		choices: { grid: 'WAVES.Settings.VisibilitySampleMode.Grid', body: 'WAVES.Settings.VisibilitySampleMode.Body' },
 		default: 'grid',
 	});
+	game.settings.register(MODULE_ID, 'coverCalculationMode', {
+		name: 'WAVES.Settings.CoverCalculationMode.Name',
+		hint: 'WAVES.Settings.CoverCalculationMode.Hint',
+		scope: 'world',
+		config: true,
+		type: String,
+		choices: { sampled3d: 'WAVES.Settings.CoverCalculationMode.Sampled3D', corners3d: 'WAVES.Settings.CoverCalculationMode.Corners3D' },
+		default: 'sampled3d',
+	});
+	game.settings.register(MODULE_ID, 'tokenCover', {
+		name: 'WAVES.Settings.TokenCover.Name',
+		hint: 'WAVES.Settings.TokenCover.Hint',
+		scope: 'world',
+		config: true,
+		type: Boolean,
+		default: false,
+	});
 	game.settings.register(MODULE_ID, 'visionSourceMode', {
 		name: 'WAVES.Settings.VisionSourceMode.Name',
 		hint: 'WAVES.Settings.VisionSourceMode.Hint',
@@ -186,7 +203,7 @@ export function registerSettings() {
 export function renderSettingsConfig(_app, html) {
 	const root = html instanceof HTMLElement ? html : html?.[0];
 	if (!root) return;
-	const sampledSettings = ['peekingMode', 'visibilitySampleMode', 'visionSourceMode', ...Object.keys(EYE_SETTING_DEFAULTS)];
+	const sampledSettings = ['peekingMode', 'visibilitySampleMode', 'coverCalculationMode', 'tokenCover', 'visionSourceMode', ...Object.keys(EYE_SETTING_DEFAULTS)];
 	const updateSampledSettings = () => {
 		const sampled = root?.querySelector(`[name="${MODULE_ID}.visibilityCalculationMode"]`)?.value === 'sampled';
 		for (const key of sampledSettings) root?.querySelector(`[name="${MODULE_ID}.${key}"]`)?.closest('.form-group')?.toggleAttribute('hidden', !sampled);
@@ -247,7 +264,6 @@ export function normalizeTokenVisionFlags(changes) {
 	if (!flags) return;
 	for (const key of Object.keys(EYE_SETTING_DEFAULTS)) {
 		if (flags[key] !== '' && flags[key] !== null) continue;
-		delete flags[key];
-		flags[`-=${key}`] = null;
+		flags[key] = new foundry.data.operators.ForcedDeletion();
 	}
 }
