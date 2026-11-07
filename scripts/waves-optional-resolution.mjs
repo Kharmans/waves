@@ -12,5 +12,5 @@ export function resolveIsProne(subject) {
 }
 
 export function resolveIsHidden(subject) {
-  return adapter.isHidden(subject);
+  return Boolean((subject?.document ?? subject)?.hidden || adapter.isHidden(subject));
 }
