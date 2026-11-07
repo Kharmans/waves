@@ -67,6 +67,7 @@ function synchronizeTokenLevel(document, movement, operation) {
 }
 Hooks.once('init', () => {
 	registerSettings();
+	registerWallHeightHooks();
 	registerHeightAwareVisibilityHooks();
 });
 
@@ -77,7 +78,6 @@ Hooks.on('preMoveToken', synchronizeTokenLevel);
 
 Hooks.once('ready', () => {
 	warnElevationLevelChangeConflict();
-	registerWallHeightHooks();
 	if (game.system?.id === 'dnd5e') registerDnd5eVisibilityAdapter();
 	game.modules.get(MODULE_ID).api = {
 		MODULE_ID,

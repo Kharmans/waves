@@ -9,7 +9,7 @@
       "SupportMessage": "Toss a Coin to your Bugbear",
       "Title": "Resources & Support: WAVES"
     },
-    "Wall": { "Height": "Wall height", "Bottom": "Wall Bottom", "Top": "Wall Top", "HeightHint": "Levels are assigned automatically from this elevation range." },
+    "Wall": { "Height": "Wall height", "Bottom": "Wall Bottom", "Top": "Wall Top", "Levels": "Levels", "PaletteHint": "Blank bounds mean unlimited height. An empty Level selection applies to all Levels. Heights and Levels are synchronized.", "HeightHint": "Levels are assigned automatically from this elevation range." },
     "Settings": {
       "PeekingMode": { "Name": "Automatic peeking", "Hint": "Allow tokens adjacent to sight-blocking cover to use target-specific peeking positions. Outside combat, eligible tokens may peek; during combat, only the active combatant may peek.", "Disabled": "Off", "Auto": "On" },
       "VisibilitySampleMode": { "Name": "Target area", "Hint": "Choose how much of the target is tested when deciding visibility and cover.", "Grid": "Whole occupied space", "Body": "Smaller body area" },

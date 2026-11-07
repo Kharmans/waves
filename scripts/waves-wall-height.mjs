@@ -50,7 +50,7 @@ export function registerWallHeightHooks() {
 			});
 		} else wall.updateSource({ 'flags.waves.height': { bottom: null, top: null }, levels: [] });
 	});
-	Hooks.on('renderWallConfig', (app, html) => {
+	const renderWallHeight = (app, html) => {
 		const root = html;
 		if (!root || root.querySelector('[name="flags.waves.height.bottom"]')) return;
 
@@ -58,6 +58,8 @@ export function registerWallHeightHooks() {
 		const fields = document.createElement('div');
 		fields.classList.add('form-fields');
 		const inputs = {};
+		const palette = app.constructor.SETTING_KEY === 'wallPalette';
+		const rows = [];
 		for (const [key, label] of [
 			['bottom', 'WAVES.Wall.Bottom'],
 			['top', 'WAVES.Wall.Top'],
@@ -72,6 +74,7 @@ export function registerWallHeightHooks() {
 			input.value = height[key] ?? '';
 			inputs[key] = input;
 			fields.append(fieldLabel, input);
+			if (palette) rows.push(foundry.applications.fields.createFormGroup({ label: fieldLabel.textContent, input }));
 		}
 
 		const field = foundry.applications.fields.createFormGroup({
@@ -79,8 +82,42 @@ export function registerWallHeightHooks() {
 			hint: game.i18n.localize('WAVES.Wall.HeightHint'),
 			input: fields,
 		});
-		const levels = root.querySelector('[name="levels"]');
-		levels?.closest('.form-group')?.after(field);
+		let levels = root.querySelector('[name="levels"]');
+		let levelGroup = levels?.closest('.form-group');
+		if (palette) {
+			if (!levels) {
+				levels = foundry.applications.fields.createMultiSelectInput({
+					name: 'levels', value: Array.from(app.document.levels ?? []),
+					options: Array.from(app.document.parent.levels, level => ({ value: level.id, label: level.name })),
+				});
+				levelGroup = foundry.applications.fields.createFormGroup({
+					label: game.i18n.localize('WAVES.Wall.Levels'), input: levels,
+				});
+			}
+			const section = document.createElement('details');
+			section.open = true;
+			section.dataset.sync = 'details-waves-wall-height';
+			const summary = document.createElement('summary');
+			summary.textContent = 'WAVES';
+			const fieldset = document.createElement('fieldset');
+			const legend = document.createElement('legend');
+			legend.textContent = 'WAVES';
+			legend.dataset.action = 'closeDetails';
+			const hint = document.createElement('p');
+			hint.classList.add('hint');
+			hint.textContent = game.i18n.localize('WAVES.Wall.PaletteHint');
+			fieldset.append(legend, ...rows, levelGroup, hint);
+			section.append(summary, fieldset);
+			(root.querySelector('[data-application-part="body"]') ?? root.querySelector('.standard-form') ?? root).append(section);
+			if (app.isSelect && app._multiFields?.has('levels')) app._setPlaceholder(levels);
+		} else if (levelGroup) levelGroup.after(field);
+		else (root.querySelector('[data-application-part="body"]') ?? root.querySelector('.standard-form') ?? root).prepend(field);
+		if (app.isSelect && app.controlled?.length > 1) {
+			for (const [key, input] of Object.entries(inputs)) {
+				const values = app.controlled.map((wall) => getWallHeightBounds(wall)[key]);
+				if (values.some((value) => value !== values[0])) app._setPlaceholder(input);
+			}
+		}
 		if (!levels) return;
 
 		const getSelected = () =>
@@ -104,6 +141,7 @@ export function registerWallHeightHooks() {
 		let selected = new Set(getSelected());
 
 		const syncLevelsFromHeight = () => {
+			if (Object.values(inputs).some((input) => input.classList.contains('multiple-values'))) return;
 			const bottom = getBound(inputs.bottom);
 			const top = getBound(inputs.top);
 			if (Number.isNaN(bottom) || Number.isNaN(top) || bottom >= top) return;
@@ -156,10 +194,13 @@ export function registerWallHeightHooks() {
 		});
 		for (const input of Object.values(inputs)) {
 			input.addEventListener('change', () => {
+				input.classList.remove('multiple-values');
 				if (!syncing) syncLevelsFromHeight();
 			});
 		}
-	});
+	};
+	Hooks.on('renderWallConfig', renderWallHeight);
+	Hooks.on('renderWallPalette', renderWallHeight);
 	Hooks.on('preUpdateWall', (wall, change) => {
 		const { bottom, top } = getWallHeightBounds(wall, change);
 		if (Number.isNaN(bottom) || Number.isNaN(top) || bottom >= top) return;
@@ -174,6 +215,6 @@ export function registerWallHeightHooks() {
 	});
 	Hooks.on('updateWall', (wall, change) => {
 		if (wall.parent !== canvas.scene || !foundry.utils.hasProperty(change, 'flags.waves.height')) return;
-		canvas.perception.update({ initializeVision: true, refreshVision: true });
+		canvas.perception.update({ initializeLighting: true, refreshLighting: true, initializeVision: true, refreshVision: true });
 	});
 }
