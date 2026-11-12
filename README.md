@@ -2,11 +2,11 @@
 
 **Walls And Vision Elevation Sampling** adds height-aware walls, three-dimensional visibility sampling, cover, peeking, and surface-aware sight to Foundry Virtual Tabletop.
 
-WAVES is currently an **alpha release** for **Foundry VTT v14.367**. Use in an active campaign is not advisable.
+WAVES is currently an **alpha release**, targeting **Foundry VTT v14.370** with a minimum version of v14.367. Use in an active campaign is not advisable.
 
 ## Requirements
 
-- Foundry Virtual Tabletop v14.367
+- Foundry Virtual Tabletop v14.367 or later in v14 (verified on v14.370)
 - [libWrapper](https://github.com/ruipin/fvtt-lib-wrapper)
 
 WAVES is system-independent at its core. Its dnd5e integration recognizes the `prone` and `hiding` statuses.
@@ -32,11 +32,15 @@ WAVES mode provides:
 - target-specific height-aware illumination recovery;
 - additional cached vision polygons as a performant canvas approximation.
 
-Target-specific visibility is authoritative. The rendered canvas mask is an approximation and may not represent every sampled ray.
+With **Viewing position** set to **Whole occupied space**, source samples include inset corners, edge midpoints, and centers of occupied grid cells at the configured eye elevations. Center viewing uses the token's center at those eye elevations.
+
+WAVES creates additional cached Foundry vision sources at eligible sample positions and draws their polygons into the same vision mask. This produces a visual union without explicitly merging polygon geometry. Target-specific 3D ray tests determine WAVES geometric visibility; the rendered mask is an approximation and may not represent every sampled ray. Foundry's detection rules still determine whether a token can be seen.
 
 ## Wall heights and Levels
 
 Wall Configuration includes **Wall Bottom** and **Wall Top** fields. A wall blocks a ray only when the ray crosses it within that interval. The bottom is inclusive and the top is exclusive.
+
+The Wall Tools palette also provides a collapsible **WAVES** section with Wall Bottom, Wall Top, and Levels. Selected walls with different heights show mixed-value placeholders; applying changes updates only edited bounds.
 
 Blank bounds mean negative or positive infinity. A wall with both bounds blank is vertically unbounded. Level assignments remain a separate Foundry constraint; a wall applies across all Levels only when its Level assignment is empty.
 
@@ -79,16 +83,22 @@ In WAVES mode, Token Configuration provides optional overrides for eye height, v
 
 ## Cover
 
-| Visible target samples | Result | Bonus |
+| Uncovered target samples | Result | Bonus |
 | --- | --- | --- |
 | 0% | Total cover | — |
 | Up to 25% | Three-quarters cover | +5 |
 | More than 25%, up to 50% | Half cover | +2 |
 | More than 50% | No cover | +0 |
 
-Any visible sample makes the target visible. Total cover prevents it from being attackable through the WAVES API.
+Any geometrically visible sample gives the target line of sight, subject to Foundry's detection rules. Cover uses the proportion of uncovered samples in the selected cover mode. Total cover prevents the target from being attackable through the WAVES API.
 
-WAVES currently reports cover and its suggested bonus through the API only. It does not apply attack modifiers, conditions, or other automation. Integrations with systems or automation modules such as Automated Conditions 5e or Midi-QOL may be added later.
+**Cover calculation** selects either the normal sampled 3D rays or 3D corner-to-corner rays. Corner-to-corner chooses the source corner or eligible peeking position that exposes the most target corners, then applies the same cover thresholds. This is a 3D extension, not a literal implementation of the D&D grid-cover rules.
+
+When **Token-to-token cover** is enabled, intervening non-hidden tokens can reduce the uncovered target samples using their TokenDocument horizontal footprint, elevation, and depth. Tokens do not block binary visibility or the rendered vision mask.
+
+Cover checks, including peeking and corner samples, support TokenDocuments without rendered Token objects. Intervening tokens are read from the Scene's documents, including tokens on other Levels. Calculations require the currently viewed Scene; passing a token from another Scene throws an error because collision checks use the active canvas.
+
+WAVES reports cover and its suggested bonus through the API. Automated Conditions 5e integrates with WAVES for cover automation in the D&D5e system only. WAVES itself does not apply attack modifiers, conditions, or other automation.
 
 ## Automatic peeking
 
@@ -108,9 +118,11 @@ A Region elevation range does not give the surface physical thickness.
 
 ## Height-aware illumination and detection
 
-Foundry's rendered light polygons remain two-dimensional. WAVES can recover a geometrically visible target reached by an active light source through height-valid light rays even when Foundry's rendered light shape is blocked at another elevation.
+Foundry's rendered light polygons remain two-dimensional. WAVES filters their walls at the light source's elevation, so a light above a wall's top can shine past it. This is a horizontal approximation, not a three-dimensional shadow calculation. The painted area can therefore disagree with illumination of a token at another elevation.
 
-A Tile with **Restrict Light** blocks those recovered light rays as a horizontal plane at the Tile's elevation when it applies to the source or target Level. WAVES does not add Tile thickness or treat ordinary Tiles as sight blockers.
+For height-aware token illumination, WAVES reads ambient and token light emission from Scene documents, including emitters without rendered objects on the viewed Level. It checks three-dimensional range, direction, wall heights, Proximity/Reverse Proximity thresholds and attenuation, and light-blocking surfaces. Core global and third-party light sources remain supplied by Foundry.
+
+A Tile with **Restrict Light** blocks those recovered light rays as a horizontal plane at the Tile's elevation when it applies to the source or target Level. Texture transparency is respected even when the Tile is not rendered. Until its texture is available, its footprint conservatively blocks light. WAVES does not add Tile thickness or treat ordinary Tiles as sight blockers.
 
 Recovered targets use distinct outlines:
 
@@ -141,6 +153,8 @@ All WAVES settings are world settings.
 | Visibility mode | Foundry | Select Foundry center visibility or WAVES sampling. |
 | Automatic peeking | Off | Permit eligible target-specific peeking. |
 | Target area | Whole occupied space | Sample the full occupied area or a smaller body area. |
+| Cover calculation | Sampled 3D | Use sampled rays or 3D corner-to-corner checks. |
+| Token-to-token cover | Off | Include intervening non-hidden token volumes in either cover mode. |
 | Viewing position | Center | Look from the center or multiple occupied-space positions. |
 | Eye height | 85% | Default eye position within token depth. |
 | Vertical eye movement | 10% | Normal movement above and below eye height. |
@@ -171,6 +185,24 @@ const result = waves.measureVisibility(sourceToken, targetToken, {
 
 The result includes `visible`, `detected`, `attackable`, `attackableInTurn`, `percentage`, `cover`, `coverBonus`, sample counts, and peeking information.
 
+`visibleSamples / totalSamples` describes geometric visibility. `uncoveredSamples / totalCoverSamples` determines `percentage` and cover; corner mode tests eight target corners. These are geometry results, not a replacement for Foundry's lighting, range, or special-sense detection checks.
+
+Sampled results also include `coverDetails`: the selected corner `origin` (null for combined sampled origins), `wallBlockedSamples`, `surfaceBlockedSamples`, `tokenBlockedSamples`, `unreachableSamples`, `uncoveredSamples`, and `totalSamples`. Blocker counts follow wall → surface → token precedence; they are not independently calculated cover categories. Corner origins must be reachable from the source's center at that height. Eligible peeking positions still follow the peeking setting and combat turn.
+
+To check whether a token receives height-aware illumination:
+
+```js
+(() => {
+  const token = canvas.scene.tokens.get("TOKEN_ID");
+  if (!token) throw new Error("Token not found in the current Scene.");
+  console.log(waves.isHeightAwareIlluminated(token));
+})();
+```
+
+`isHeightAwareIlluminated(token)` accepts a Token or TokenDocument and returns a boolean: `true` when at least one reachable target sample receives light, otherwise `false`. Different source and target Levels do not by themselves prevent illumination. The token must belong to the currently viewed Scene; tokens from another Scene throw an error. A rendered Token object is not required.
+
+This is an illumination query, not an observer-to-target detection query. It does not establish whether a particular observer can see the token, and its result need not match the painted light area. While a blocking Tile texture loads, the result may remain `false`; detection refreshes when loading completes.
+
 For visual and console diagnostics:
 
 ```js
@@ -180,12 +212,13 @@ waves.measureVisibility(sourceToken, targetToken, {
 });
 ```
 
-This temporarily draws successful and blocked rays and logs one JSON object. Other API functions include:
+This temporarily draws successful and blocked cover rays and logs one JSON object containing both visibility diagnostics and `coverDetails.rays`. In corner mode these rays originate from the selected cover corner or peeking position. Other API functions include:
 
 ```js
 waves.getVisionOrigins(token, options);
 waves.getWallHeightBounds(wall);
 waves.hasBlockingWallCollision(origin, destination, type);
+waves.isHeightAwareIlluminated(token);
 waves.registerOptionalResolutionAdapter(adapter);
 waves.syncWallHeightsFromLevels(scene, options);
 waves.testVisibility(source, target);
@@ -198,9 +231,9 @@ waves.testVisibility(source, target);
 - Foundry's rendered light shapes are not rebuilt in three dimensions.
 - Occupied-space sampling may create a one-grid-space observational advantage near platform edges.
 - Movement clearance uses the token's current vertical volume; vertically changing paths require further work.
-- Gridless and hex scenes require broader release testing.
+- Intervening token cover uses rectangular bounds rather than exact hexagonal or nonrectangular occupied shapes.
 - Hidden and invisible targets remain subject to Foundry’s detection-mode checks.
 
 ## Reporting issues
 
-Include reproduction steps, whether other modules were disabled, and the issue-report payload. The payload contains active module versions, scene geometry, WAVES settings, and the visibility result, so review it before sharing. Use `waves.measureVisibility(source, target, { showTestSamples: true })` only when temporary ray visualization is also useful.
+Include reproduction steps, whether other modules were disabled, and the issue-report payload. It contains active module versions, scene geometry, WAVES settings, token detection settings, rendering state, combat state, and `visibility` / `reverseVisibility` results, so review it before sharing. Rendering state reflects the current client's combined vision sources; it does not establish either token's individual detectability. Use `waves.measureVisibility(source, target, { showTestSamples: true })` only when temporary ray visualization is also useful.
