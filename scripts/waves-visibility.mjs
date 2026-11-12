@@ -73,15 +73,16 @@ function hasBlockingWallVolumeCollision(origin, destination, bottom, top) {
 }
 
 function isPointOnSightWall(point) {
-	return canvas.walls.placeables.some((wall) => {
-		const document = wall.document;
+	return Array.from(canvas.scene.walls).some((document) => {
 		if (document.sight === CONST.EDGE_SENSE_TYPES.NONE) return false;
 		if (document.door && document.ds === CONST.WALL_DOOR_STATES.OPEN) return false;
 		if (!wallBlocksAtElevation(document, point.elevation)) return false;
-		if (wall.edge.a.x === wall.edge.b.x && wall.edge.a.y === wall.edge.b.y) {
-			return Math.hypot(point.x - wall.edge.a.x, point.y - wall.edge.a.y) <= 1;
+		const [x1, y1, x2, y2] = document.c;
+		const a = { x: x1, y: y1 }, b = { x: x2, y: y2 };
+		if (x1 === x2 && y1 === y2) {
+			return Math.hypot(point.x - x1, point.y - y1) <= 1;
 		}
-		const closest = foundry.utils.closestPointToSegment(point, wall.edge.a, wall.edge.b);
+		const closest = foundry.utils.closestPointToSegment(point, a, b);
 		return Math.hypot(point.x - closest.x, point.y - closest.y) <= 1;
 	});
 }
@@ -106,7 +107,7 @@ function getWallCollisionOptions(source) {
 	return { externalRadius: object?.externalRadius ?? source?.data?.externalRadius ?? 0 };
 }
 
-export function hasBlockingWallCollision(origin, destination, type = 'move', { useThreshold = type === 'sight', externalRadius = 0 } = {}) {
+export function hasBlockingWallCollision(origin, destination, type = 'move', { useThreshold = type === 'sight' || type === 'light' || type === 'darkness', externalRadius = 0 } = {}) {
 	if (!canvas.dimensions.rect.contains(origin.x, origin.y)) return false;
 	const backend = CONFIG.Canvas.polygonBackends[type];
 	const thresholdOrigin = { x: Math.round(origin.x), y: Math.round(origin.y) };
@@ -162,11 +163,52 @@ function hasBlockingSurfaceCollision(origin, destination, type) {
 	return canvas.scene.testSurfaceCollision(origin, destination, { type, mode: 'any', tMax: Math.min(1, t + epsilon), level: originLevel }) || (t < 1 && canvas.scene.testSurfaceCollision(origin, destination, { type, mode: 'any', tMin: Math.max(0, t - epsilon), level: destinationLevel }));
 }
 
+const tileLightMeshes = new Map();
+
+function clearTileLightMeshes() {
+	for (const entry of tileLightMeshes.values()) {
+		if (entry.mesh) canvas.primary?.quadtree?.remove(entry.mesh);
+		entry.container?.destroy({ children: true });
+	}
+	tileLightMeshes.clear();
+}
+
+function getTileLightMesh(document) {
+	let entry = tileLightMeshes.get(document);
+	if (entry) return entry.mesh;
+	entry = {};
+	tileLightMeshes.set(document, entry);
+	const initialize = (texture) => {
+		if (tileLightMeshes.get(document) !== entry || !texture?.valid) return;
+		const mesh = new foundry.canvas.primary.PrimarySpriteMesh({ texture });
+		entry.container = new foundry.canvas.primary.PrimaryCanvasContainer();
+		entry.container.addChild(mesh);
+		const { x, y, width, height, anchorX, anchorY, rotation } = document.shape;
+		mesh.position.set(x, y);
+		mesh.angle = rotation;
+		mesh.resize(width, height, document.texture);
+		mesh.anchor.set(anchorX, anchorY);
+		mesh.textureAlphaThreshold = document.texture.alphaThreshold;
+		mesh.updateCanvasTransform();
+		entry.mesh = mesh;
+	};
+	const texture = foundry.canvas.getTexture(document.texture.src);
+	if (texture?.valid) initialize(texture);
+	else if (document.texture.src) {
+		void foundry.canvas.loadTexture(document.texture.src).then((loaded) => {
+			initialize(loaded);
+			if (tileLightMeshes.get(document) !== entry) return;
+			heightIlluminationCache.clear();
+			if (canvas.ready) canvas.perception.update({ refreshVision: true });
+		}).catch((error) => console.warn('WAVES | Unable to load light-blocking Tile texture', error));
+	}
+	return entry.mesh;
+}
+
 function hasBlockingTileLightCollision(origin, destination) {
 	const delta = destination.elevation - origin.elevation;
 	if (!delta) return false;
-	for (const tile of canvas.tiles.placeables) {
-		const document = tile.document;
+	for (const document of canvas.scene.tiles) {
 		if (document.hidden || !document.restrictions.light) continue;
 		if (!document.includedInLevel(origin.level) && !document.includedInLevel(destination.level)) continue;
 		const t = (document.elevation - origin.elevation) / delta;
@@ -175,7 +217,8 @@ function hasBlockingTileLightCollision(origin, destination) {
 			x: Math.mix(origin.x, destination.x, t),
 			y: Math.mix(origin.y, destination.y, t),
 		};
-		if (tile.mesh?.containsCanvasPoint(point)) return true;
+		const mesh = getTileLightMesh(document);
+		if (mesh ? mesh.containsCanvasPoint(point) : document.shape.testPoint(point)) return true;
 	}
 	return false;
 }
@@ -901,7 +944,7 @@ function getAutomaticTargetSamples(source, target) {
 }
 
 function getCachedCollision(origin, destination, type, surface = false, options = {}) {
-	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.level ?? canvas.level?.id}:${destination.level ?? canvas.level?.id}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}:${options.useThreshold ?? (type === 'sight')}:${options.externalRadius ?? 0}`;
+	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.level ?? canvas.level?.id}:${destination.level ?? canvas.level?.id}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}:${options.useThreshold ?? (type === 'sight' || type === 'light' || type === 'darkness')}:${options.externalRadius ?? 0}`;
 	if (collisionCache.has(key)) return collisionCache.get(key);
 	const collision = surface ? hasBlockingSurfaceCollision(origin, destination, type) : hasBlockingWallCollision(origin, destination, type, options);
 	collisionCache.set(key, collision);
@@ -940,17 +983,85 @@ function isPointWithinLightSource(source, point) {
 	return (((direction - minimum) % 360) + 360) % 360 <= angle;
 }
 
-function isHeightAwareIlluminated(target) {
+function getAmbientLightLevel(document, scene) {
+	let selected, fallback, rank = Infinity;
+	for (const id of document.levels.size ? document.levels : scene.levels.keys()) {
+		const level = scene.levels.get(id);
+		if (!level) continue;
+		fallback ??= level;
+		const { bottom, top } = level.elevation;
+		const elevation = document.elevation;
+		if (elevation < bottom || elevation > top) continue;
+		// Prefer interiors, then bottom boundaries, then top boundaries, independent of the viewer.
+		const candidateRank = bottom < elevation && elevation < top ? 0 : bottom === elevation ? 1 : 2;
+		if (candidateRank >= rank) continue;
+		selected = level;
+		rank = candidateRank;
+	}
+	return (selected ?? fallback)?.id ?? null;
+}
+
+function getDocumentLightSources(scene) {
+	const sources = [];
+	const scale = scene.grid.size / scene.grid.distance;
+	const darkness = canvas.darknessLevel ?? scene.environment.darknessLevel;
+	for (const document of [...scene.lights, ...scene.tokens]) {
+		const token = document.documentName === 'Token';
+		const config = token ? document.light : document.config;
+		if (document.hidden || !config?.angle || !(config.dim || config.bright)) continue;
+		if (darkness < config.darkness.min || darkness > config.darkness.max) continue;
+		if (token && document.hasStatusEffect(CONFIG.specialStatusEffects.BURROW)) continue;
+		const externalRadius = token ? getWallCollisionOptions(document).externalRadius : 0;
+		const radius = Math.max(config.dim, config.bright) * scale + externalRadius;
+		if (radius <= 0) continue;
+		const origin = token ? { ...document.getLightOrigin(), level: document.level } : {
+			x: document.x, y: document.y, elevation: document.elevation,
+			level: getAmbientLightLevel(document, scene),
+		};
+		sources.push({
+			origin, radius, externalRadius, walls: token || document.walls,
+			negative: config.negative, priority: config.priority ?? 0,
+			data: { angle: config.angle, rotation: document.rotation },
+		});
+	}
+	// Retain global and third-party sources which have no embedded light document.
+	for (const source of canvas.effects.lightSources) {
+		if (['AmbientLight', 'Token'].includes(source.object?.document?.documentName)) continue;
+		if (!source.active || source.suppression?.darkness) continue;
+		sources.push({
+			origin: source.origin, radius: source.radius, data: source.data,
+			walls: source.data?.walls ?? true, externalRadius: source.data?.externalRadius ?? 0,
+			priority: source.priority ?? 0, negative: false,
+		});
+	}
+	return sources;
+}
+
+function lightReachesPoint(source, destination) {
+	const type = source.negative ? 'darkness' : 'light';
+	return isPointWithinLightSource(source, destination)
+		&& (!source.walls || !getCachedCollision(source.origin, destination, type, false, { externalRadius: source.externalRadius }))
+		&& !getCachedCollision(source.origin, destination, type, true)
+		&& !hasBlockingTileLightCollision(source.origin, destination);
+}
+
+export function isHeightAwareIlluminated(target) {
+	// Validate scene ownership even when a cached result exists.
+	getVisibilityPoint(target);
 	const targetId = target.document?.uuid ?? target.id;
 	if (heightIlluminationCache.has(targetId)) return heightIlluminationCache.get(targetId);
 	const samples = getReachableTokenVisibilityPoints(target);
-	const illuminated = canvas.effects.lightSources.some((source) => {
-		if (!source.active || source.suppression?.darkness) return false;
-		const origin = source.origin;
-		return samples.some((destination) => isPointWithinLightSource(source, destination)
-			&& !getCachedCollision(origin, destination, 'light')
-			&& !getCachedCollision(origin, destination, 'light', true)
-			&& !hasBlockingTileLightCollision(origin, destination));
+	const sources = getDocumentLightSources(canvas.scene);
+	// Resolve stronger sources first; darkness wins equal-priority light/darkness ties.
+	sources.sort((a, b) => b.priority - a.priority || Number(Boolean(b.negative)) - Number(Boolean(a.negative)));
+	const active = [];
+	for (const source of sources) {
+		if (active.some((other) => Boolean(other.negative) !== Boolean(source.negative) && lightReachesPoint(other, source.origin))) continue;
+		active.push(source);
+	}
+	const illuminated = samples.some((destination) => {
+		const strongest = active.find((source) => lightReachesPoint(source, destination));
+		return strongest && !strongest.negative;
 	});
 	heightIlluminationCache.set(targetId, illuminated);
 	return illuminated;
@@ -1036,6 +1147,7 @@ export function registerHeightAwareVisibilityHooks() {
 		refreshWallHeightOverlay();
 	});
 	Hooks.on('canvasTearDown', () => {
+		clearTileLightMeshes();
 		invalidateHeightVisibilityCache();
 		sourceAnchorHistory.clear();
 		movingTokens.clear();
@@ -1059,7 +1171,14 @@ export function registerHeightAwareVisibilityHooks() {
 			if (behavior.type === 'defineSurface' && (behavior.system.sight || behavior.system.light || ['system.sight', 'system.light'].some((field) => foundry.utils.hasProperty(change ?? {}, field)))) refreshSightSurfaces();
 		});
 	}
-	for (const hook of ['createTile', 'updateTile', 'deleteTile']) Hooks.on(hook, invalidateHeightVisibilityCache);
+	for (const hook of ['createTile', 'updateTile', 'deleteTile']) Hooks.on(hook, () => {
+		clearTileLightMeshes();
+		refreshSightSurfaces();
+	});
+	for (const hook of ['createAmbientLight', 'updateAmbientLight', 'deleteAmbientLight', 'updateScene']) Hooks.on(hook, refreshSightSurfaces);
+	Hooks.on('updateToken', (document) => {
+		if (!document.object) refreshSightSurfaces();
+	});
 
 	Hooks.on('updateCombat', (combat, change) => {
 		if (!['round', 'turn', 'active'].some((field) => foundry.utils.hasProperty(change, field))) return;
