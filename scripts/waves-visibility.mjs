@@ -107,13 +107,13 @@ function getWallCollisionOptions(source) {
 	return { externalRadius: object?.externalRadius ?? source?.data?.externalRadius ?? 0 };
 }
 
-export function hasBlockingWallCollision(origin, destination, type = 'move', { useThreshold = type === 'sight' || type === 'light' || type === 'darkness', externalRadius = 0 } = {}) {
+export function hasBlockingWallCollision(origin, destination, type = 'move', { useThreshold = type === 'sight' || type === 'light' || type === 'darkness', externalRadius = 0, priority = 0 } = {}) {
 	if (!canvas.dimensions.rect.contains(origin.x, origin.y)) return false;
 	const backend = CONFIG.Canvas.polygonBackends[type];
 	const thresholdOrigin = { x: Math.round(origin.x), y: Math.round(origin.y) };
 	for (const level of canvas.scene.levels) {
 		// Retain threshold intersections so attenuation can limit rays beyond the wall.
-		const collisions = backend.testCollision(origin, destination, { type, mode: 'all', level, useThreshold: false, externalRadius, wavesIntersectionElevation: true });
+		const collisions = backend.testCollision(origin, destination, { type, mode: 'all', level, useThreshold: false, externalRadius, priority, wavesIntersectionElevation: true });
 		if (
 			collisions.some((collision) => {
 				const elevation = origin.elevation + (destination.elevation - origin.elevation) * collision._distance;
@@ -944,7 +944,7 @@ function getAutomaticTargetSamples(source, target) {
 }
 
 function getCachedCollision(origin, destination, type, surface = false, options = {}) {
-	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.level ?? canvas.level?.id}:${destination.level ?? canvas.level?.id}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}:${options.useThreshold ?? (type === 'sight' || type === 'light' || type === 'darkness')}:${options.externalRadius ?? 0}`;
+	const key = `${surface ? 'surface' : 'wall'}:${type}:${origin.level ?? canvas.level?.id}:${destination.level ?? canvas.level?.id}:${origin.x}:${origin.y}:${origin.elevation}:${destination.x}:${destination.y}:${destination.elevation}:${options.useThreshold ?? (type === 'sight' || type === 'light' || type === 'darkness')}:${options.externalRadius ?? 0}:${options.priority ?? 0}`;
 	if (collisionCache.has(key)) return collisionCache.get(key);
 	const collision = surface ? hasBlockingSurfaceCollision(origin, destination, type) : hasBlockingWallCollision(origin, destination, type, options);
 	collisionCache.set(key, collision);
@@ -1040,7 +1040,7 @@ function getDocumentLightSources(scene) {
 function lightReachesPoint(source, destination) {
 	const type = source.negative ? 'darkness' : 'light';
 	return isPointWithinLightSource(source, destination)
-		&& (!source.walls || !getCachedCollision(source.origin, destination, type, false, { externalRadius: source.externalRadius }))
+		&& (!source.walls || !getCachedCollision(source.origin, destination, type, false, { externalRadius: source.externalRadius, priority: source.priority }))
 		&& !getCachedCollision(source.origin, destination, type, true)
 		&& !hasBlockingTileLightCollision(source.origin, destination);
 }
