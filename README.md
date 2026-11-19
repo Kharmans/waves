@@ -15,7 +15,7 @@ WAVES is system-independent at its core. Its dnd5e integration recognizes the `p
 
 ### Foundry
 
-Uses Foundry's center-based visibility with height-aware walls. This conservative compatibility mode does not calculate sampled cover.
+WAVES tests a single ray between the tokens' vision origins for its own geometric visibility check. Foundry still runs its detection modes. Sampled cover is available in WAVES mode.
 
 ### WAVES
 
@@ -30,7 +30,7 @@ WAVES mode provides:
 - optional automatic peeking;
 - support for sight aware **Define Surface** Region behaviors;
 - target-specific height-aware illumination recovery;
-- additional cached vision polygons as a performant canvas approximation.
+- additional cached vision polygons for the rendered vision mask.
 
 With **Viewing position** set to **Whole occupied space**, source samples include inset corners, edge midpoints, and centers of occupied grid cells at the configured eye elevations. Center viewing uses the token's center at those eye elevations.
 
@@ -42,7 +42,7 @@ Wall Configuration includes **Wall Bottom** and **Wall Top** fields. A wall bloc
 
 The Wall Tools palette also provides a collapsible **WAVES** section with Wall Bottom, Wall Top, and Levels. Selected walls with different heights show mixed-value placeholders; applying changes updates only edited bounds.
 
-Blank bounds mean negative or positive infinity. A wall with both bounds blank is vertically unbounded. Level assignments remain a separate Foundry constraint; a wall applies across all Levels only when its Level assignment is empty.
+A blank bottom or top leaves that end of an explicit height range open. When both bounds are blank, WAVES uses the elevation ranges of the wall's assigned Levels. With both bounds blank and no assigned Levels, the wall blocks at every elevation for its configured restrictions.
 
 Changing wall heights updates the Foundry Level assignments overlapped by the range. Changing Level assignments also updates the height range.
 
@@ -86,7 +86,7 @@ In WAVES mode, Token Configuration provides optional overrides for eye height, v
 | Uncovered target samples | Result | Bonus |
 | --- | --- | --- |
 | 0% | Total cover | — |
-| Up to 25% | Three-quarters cover | +5 |
+| More than 0%, up to 25% | Three-quarters cover | +5 |
 | More than 25%, up to 50% | Half cover | +2 |
 | More than 50% | No cover | +0 |
 
@@ -121,6 +121,8 @@ A Region elevation range does not give the surface physical thickness.
 Foundry's rendered light polygons remain two-dimensional. WAVES filters their walls at the light source's elevation, so a light above a wall's top can shine past it. This is a horizontal approximation, not a three-dimensional shadow calculation. The painted area can therefore disagree with illumination of a token at another elevation.
 
 For height-aware token illumination, WAVES reads ambient and token light emission from Scene documents, including emitters without rendered objects on the viewed Level. It checks three-dimensional range, direction, wall heights, Proximity/Reverse Proximity thresholds and attenuation, and light-blocking surfaces. Core global and third-party light sources remain supplied by Foundry.
+
+Light and darkness compete by emitter priority. Darkness wins ties. If darkness reaches a weaker lamp through a window, it can suppress that lamp even for targets outside the darkness radius.
 
 A Tile with **Restrict Light** blocks those recovered light rays as a horizontal plane at the Tile's elevation when it applies to the source or target Level. Texture transparency is respected even when the Tile is not rendered. Until its texture is available, its footprint conservatively blocks light. WAVES does not add Tile thickness or treat ordinary Tiles as sight blockers.
 
@@ -183,20 +185,17 @@ const result = waves.measureVisibility(sourceToken, targetToken, {
 });
 ```
 
-The result includes `visible`, `detected`, `attackable`, `attackableInTurn`, `percentage`, `cover`, `coverBonus`, sample counts, and peeking information.
+The result includes `visible`, `detected`, `attackable`, `attackableInTurn`, `percentage`, `cover`, `coverBonus`, sample counts, and peeking information. Here `detected` means the geometry allows sight and the target passes the hidden-token check. Use Foundry's player view to check actual detection with lighting, range, and special senses.
 
 `visibleSamples / totalSamples` describes geometric visibility. `uncoveredSamples / totalCoverSamples` determines `percentage` and cover; corner mode tests eight target corners. These are geometry results, not a replacement for Foundry's lighting, range, or special-sense detection checks.
 
-Sampled results also include `coverDetails`: the selected corner `origin` (null for combined sampled origins), `wallBlockedSamples`, `surfaceBlockedSamples`, `tokenBlockedSamples`, `unreachableSamples`, `uncoveredSamples`, and `totalSamples`. Blocker counts follow wall → surface → token precedence; they are not independently calculated cover categories. Corner origins must be reachable from the source's center at that height. Eligible peeking positions still follow the peeking setting and combat turn.
+Sampled results also include `coverDetails`: the selected corner `origin` (null for combined sampled origins), `wallBlockedSamples`, `surfaceBlockedSamples`, `tokenBlockedSamples`, `unreachableSamples`, `uncoveredSamples`, and `totalSamples`. Blocker counts follow wall > surface > token precedence; they are not independently calculated cover categories. Corner origins must be reachable from the source's center at that height. Eligible peeking positions still follow the peeking setting and combat turn.
 
 To check whether a token receives height-aware illumination:
 
 ```js
-(() => {
-  const token = canvas.scene.tokens.get("TOKEN_ID");
-  if (!token) throw new Error("Token not found in the current Scene.");
-  console.log(waves.isHeightAwareIlluminated(token));
-})();
+const token = canvas.scene.tokens.get("TOKEN_ID");
+waves.isHeightAwareIlluminated(token);
 ```
 
 `isHeightAwareIlluminated(token)` accepts a Token or TokenDocument and returns a boolean: `true` when at least one reachable target sample receives light, otherwise `false`. Different source and target Levels do not by themselves prevent illumination. The token must belong to the currently viewed Scene; tokens from another Scene throw an error. A rendered Token object is not required.
@@ -226,12 +225,13 @@ waves.testVisibility(source, target);
 
 ## Known limitations
 
-- Rendered sampled vision is a performant approximation; target-specific measurement is authoritative.
-- Peeking origins affect target-specific visibility checks only; they do not contribute polygons to the rendered vision mask.
+- The rendered vision mask, automatic sight checks, and `waves.measureVisibility()` can disagree. In WAVES mode, automatic sight checks use up to 18 ordinary origins, 9 eligible peeking origins, and 27 target points. The API measures the full eligible sample set.
+- Peeking can reveal a target or improve measured cover while the surrounding area stays outside the rendered vision mask.
 - Foundry's rendered light shapes are not rebuilt in three dimensions.
-- Occupied-space sampling may create a one-grid-space observational advantage near platform edges.
-- Movement clearance uses the token's current vertical volume; vertically changing paths require further work.
-- Intervening token cover uses rectangular bounds rather than exact hexagonal or nonrectangular occupied shapes.
+- Near a platform edge, **Whole occupied space** can reveal areas hidden from the token's center. The difference depends on token size, placement, and scene geometry.
+- Movement clearance tests the token's vertical span at the movement ray's origin. A path that climbs or descends can cross a wall at a different elevation.
+- Corner cover and intervening-token cover use rectangular token bounds, including for hexagonal or irregular footprints.
+- On gridless scenes, both **Target area** choices use the same sample positions within the token bounds.
 - Hidden and invisible targets remain subject to Foundry’s detection-mode checks.
 
 ## Reporting issues
